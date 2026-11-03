@@ -15,7 +15,7 @@ enum Opcode {
 
 typedef struct {
     uint8_t op, rd, rs1, rs2, immediate, len;
-    uint16_t padding;
+    uint16_t dispatch_index;
     uint32_t pc, aux;
     uint64_t imm;
 } Insn;
@@ -84,11 +84,20 @@ static __uint128_t carryless(uint64_t a, uint64_t b) {
  * instruction count stay local to this
  * loop. Cached successors never make a round trip through Rust. */
 int tci_run(State *s) {
-#define OP(name) &&op_##name,
-    static const void *const dispatch[] = {
+#define OP(name) [name] = &&op_##name,
+    static const void *const fast_dispatch[256] = {
+#include "ops.def"
+#undef OP
+#define OP(name) [128 + name] = &&imm_##name,
 #include "ops.def"
     };
 #undef OP
+#define OP(name) [name] = &&checked_##name, [128 + name] = &&checked_imm_##name,
+    static const void *const checked_dispatch[256] = {
+#include "ops.def"
+    };
+#undef OP
+    const void *const *dispatch;
     uint64_t *const r = s->regs;
     uint8_t *const mem = s->memory;
     const uint8_t *const perms = s->permissions;
@@ -99,14 +108,30 @@ int tci_run(State *s) {
 
 #define RETURN(code, at) do { s->steps = steps; s->pc = (at); return (code); } while (0)
 #define DISPATCH() do { \
-    if (ip->op != Link && steps == limit) RETURN(BUDGET, ip->pc); \
-    a = r[ip->rs1]; b = ip->immediate ? ip->imm : r[ip->rs2]; \
-    goto *dispatch[ip->op]; \
+    goto *dispatch[ip->dispatch_index]; \
 } while (0)
+/* Translation selects register/immediate entries. Loading in the handler lets
+ * Clang eliminate unused operands. Checked entries preserve exact budget stops;
+ * fast entries are used only when the entire block fits in the budget. */
+#define LABEL(name) checked_##name: \
+    if (name != Link && steps == limit) RETURN(BUDGET, ip->pc); \
+    op_##name: \
+    a = r[ip->rs1]; b = r[ip->rs2]; goto body_##name; \
+    checked_imm_##name: \
+    if (name != Link && steps == limit) RETURN(BUDGET, ip->pc); \
+    imm_##name: a = r[ip->rs1]; b = ip->imm; \
+    body_##name:
+#define FUSED_LABEL(name, first) checked_##name: \
+    if (limit - steps < 2) goto checked_##first; \
+    op_##name: a = r[ip->rs1]; b = r[ip->rs2]; goto body_##name; \
+    checked_imm_##name: \
+    if (limit - steps < 2) goto checked_imm_##first; \
+    imm_##name: a = r[ip->rs1]; b = ip->imm; \
+    body_##name:
 #define NEXT() do { ++steps; ++ip; DISPATCH(); } while (0)
 #define RESULT(v) do { r[ip->rd] = (v); NEXT(); } while (0)
-#define BIN(name, expr) op_##name: RESULT(expr)
-#define BRANCH(name, condition) op_##name: \
+#define BIN(name, expr) LABEL(name) RESULT(expr)
+#define BRANCH(name, condition) LABEL(name) \
     target = (condition) ? ip->imm : (uint64_t)ip->pc + ip->len; \
     ++steps; goto lookup
 
@@ -119,13 +144,13 @@ lookup:
     }
     ip = s->blocks[target >> 1];
     if (!ip) RETURN(MISS, target);
+    dispatch = limit - steps >= MAX_BLOCK_INSNS ? fast_dispatch : checked_dispatch;
     DISPATCH();
 
-    op_Nop: NEXT();
+    LABEL(Nop) NEXT();
     BIN(Mov, b);
     BIN(Add, a + b);
-    op_AddLtu:
-        if (limit - steps < 2) goto op_Add;
+    FUSED_LABEL(AddLtu, Add)
         r[ip->rd] = a + b;
         ++ip;
         /* Read after writeback: the comparison may consume the sum. */
@@ -151,8 +176,7 @@ lookup:
     /* Unsigned multiply then correct the upper half for a's sign. */
     BIN(Mulhsu, (uint64_t)(((__uint128_t)a * b) >> 64) - ((int64_t)a < 0 ? b : 0));
     BIN(Mulhu, (uint64_t)(((__uint128_t)a * b) >> 64));
-    op_MulhuMul: {
-        if (limit - steps < 2) goto op_Mulhu;
+    FUSED_LABEL(MulhuMul, Mulhu) {
         /* Translation proves matching inputs and no high-result clobber. */
         __uint128_t product = (__uint128_t)a * b;
         r[ip->rd] = (uint64_t)(product >> 64);
@@ -170,7 +194,7 @@ lookup:
     BIN(Remw, sx32((uint32_t)rems(sx32((uint32_t)a), sx32((uint32_t)b))));
     BIN(Remuw, sx32((uint32_t)b ? (uint32_t)a % (uint32_t)b : (uint32_t)a));
 
-#define LOAD(name, type, convert) op_##name: { \
+#define LOAD(name, type, convert) LABEL(name) { \
     address = a + ip->imm; \
     if (!accessible(perms, address, sizeof(type), READ)) goto load_fault; \
     type loaded; memcpy(&loaded, mem + address, sizeof(loaded)); \
@@ -184,8 +208,7 @@ lookup:
     LOAD(Lhu, uint16_t, loaded);
     LOAD(Lwu, uint32_t, loaded);
 
-    op_LdLd: {
-        if (limit - steps < 2) goto op_Ld;
+    FUSED_LABEL(LdLd, Ld) {
         address = a + ip->imm;
         if (!accessible(perms, address, sizeof(uint64_t), READ)) goto load_fault;
         uint64_t loaded; memcpy(&loaded, mem + address, sizeof(loaded));
@@ -194,10 +217,10 @@ lookup:
         /* The first load can change the second load's base. Advance the
          * retirement count and PC before checking the second access. */
         a = r[ip->rs1];
-        goto op_Ld;
+        goto body_Ld;
     }
 
-#define STORE(name, type) op_##name: { \
+#define STORE(name, type) LABEL(name) { \
     address = a + ip->imm; \
     if (!accessible(perms, address, sizeof(type), WRITE)) goto store_fault; \
     type stored = (type)r[ip->rs2]; \
@@ -208,15 +231,14 @@ lookup:
     STORE(Sw, uint32_t);
     STORE(Sd, uint64_t);
 
-    op_SdSd: {
-        if (limit - steps < 2) goto op_Sd;
+    FUSED_LABEL(SdSd, Sd) {
         address = a + ip->imm;
         if (!accessible(perms, address, sizeof(uint64_t), WRITE)) goto store_fault;
         uint64_t stored = r[ip->rs2];
         memcpy(mem + address, &stored, sizeof(stored));
         ++steps; ++ip;
         a = r[ip->rs1];
-        goto op_Sd;
+        goto body_Sd;
     }
 
     BRANCH(Beq, a == b);
@@ -225,17 +247,17 @@ lookup:
     BRANCH(Bge, (int64_t)a >= (int64_t)b);
     BRANCH(Bltu, a < b);
     BRANCH(Bgeu, a >= b);
-    op_Jump:
+    LABEL(Jump)
         target = ip->imm;
         r[ip->rd] = (uint64_t)ip->pc + ip->len;
         ++steps; goto lookup;
-    op_JumpReg:
+    LABEL(JumpReg)
         target = (a + ip->imm) & ~UINT64_C(1);
         r[ip->rd] = (uint64_t)ip->pc + ip->len;
         ++steps; goto lookup;
-    op_Ecall:
+    LABEL(Ecall)
         ++steps; RETURN(SYSCALL, ip->pc);
-    op_Break:
+    LABEL(Break)
         RETURN(BREAKPOINT, ip->pc);
 
     BIN(Andn, a & ~b);
@@ -258,7 +280,7 @@ lookup:
     BIN(Ror, ror64(a, (unsigned)b));
     BIN(Rolw, sx32(ror32((uint32_t)a, (unsigned)(0 - b))));
     BIN(Rorw, sx32(ror32((uint32_t)a, (unsigned)b)));
-    op_Orcb:
+    LABEL(Orcb)
         value = 0;
         for (unsigned i = 0; i < 64; i += 8) {
             if ((a >> i) & 255) value |= UINT64_C(255) << i;
@@ -276,9 +298,9 @@ lookup:
     BIN(Clmul, (uint64_t)carryless(a, b));
     BIN(Clmulh, (uint64_t)(carryless(a, b) >> 64));
     BIN(Clmulr, (uint64_t)(carryless(a, b) >> 63));
-    op_Link:
+    LABEL(Link)
         target = ip->imm; goto lookup;
-    op_Trap:
+    LABEL(Trap)
         s->fault = ip->imm; RETURN((int)ip->aux, ip->pc);
 
 load_fault:

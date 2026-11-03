@@ -1,6 +1,8 @@
 use std::{env, fs, path::PathBuf, process::Command};
 
 fn main() {
+    // One shared bound for translation and the interpreter's budget fast path.
+    const MAX_BLOCK_INSNS: usize = 64;
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     assert!(
         matches!(arch.as_str(), "x86_64" | "aarch64"),
@@ -14,7 +16,7 @@ fn main() {
         .lines()
         .filter_map(|l| l.strip_prefix("OP(")?.strip_suffix(')'))
         .collect();
-    assert!(names.len() < 256);
+    assert!(names.len() <= 128);
     let mut rust = String::from(
         "#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n#[repr(u8)]\npub(crate) enum Opcode {\n",
     );
@@ -22,13 +24,17 @@ fn main() {
         rust.push_str(&format!("    {name},\n"));
     }
     rust.push_str("}\n");
+    rust.push_str(&format!(
+        "pub(crate) const MAX_BLOCK_INSNS: usize = {MAX_BLOCK_INSNS};\n"
+    ));
     fs::write(out.join("opcodes.rs"), rust).unwrap();
     let mut cc = Command::new("clang-19");
     // Match Rust's target even if Clang defaults to a different architecture.
     cc.arg(format!("--target={target}"));
+    cc.arg(format!("-DMAX_BLOCK_INSNS={MAX_BLOCK_INSNS}"));
     // Let LLVM duplicate the computed-goto dispatch tails across the opcode
     // table. Its default predecessor/successor limits (16) prevent this for
-    // our 86 handlers, even when the instruction thresholds are increased.
+    // register/immediate and checked/fast entry points. Allow all four per opcode.
     // Keep these Clang 19 settings together; see README.md for measurements
     // and disassembly checks before changing the compiler or opcode table.
     cc.args([
@@ -41,9 +47,9 @@ fn main() {
         "-mllvm",
         "-tail-dup-indirect-size=128",
         "-mllvm",
-        "-tail-dup-pred-size=128",
+        "-tail-dup-pred-size=512",
         "-mllvm",
-        "-tail-dup-succ-size=128",
+        "-tail-dup-succ-size=512",
         "-Wall",
         "-Wextra",
         "-Werror",

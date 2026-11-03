@@ -75,7 +75,7 @@ fn arithmetic_superinstructions_match_unfused_at_every_budget_boundary() {
                             regs[1] = x;
                             regs[2] = y;
                             regs[3] = 17;
-                            for budget in 0..=3 {
+                            for budget in [0, 1, 2, 3, MAX_BLOCK_INSNS as u64] {
                                 let plain = execute_pair(&code, regs, 7, budget, &mut memory);
                                 let combined = execute_pair(&fused, regs, 7, budget, &mut memory);
                                 assert_eq!(combined, plain, "{code:?}, budget={budget}");
@@ -139,7 +139,7 @@ fn memory_superinstructions_preserve_order_faults_and_budget_stops() {
                         regs[1] = first_address;
                         regs[2] = 0xfedcba9876543210;
                         regs[3] = 0x123456789abcdef0;
-                        for budget in 0..=3 {
+                        for budget in [0, 1, 2, 3, MAX_BLOCK_INSNS as u64] {
                             let plain = execute_pair(&code, regs, 11, budget, &mut memory);
                             let expected = memory.bytes.clone();
                             memory.bytes.fill(0x81);

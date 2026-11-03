@@ -62,6 +62,32 @@ includes process startup and cleanup. The final VM wall time is 4.26× faster
 than the historical Xeon measurement, a comparison across different machines,
 and 30.6% longer than ckb-debugger on this Mac.
 
+## Dispatch optimization: latest wall times
+
+Rechecked on 2026-11-03 after operand specialization and block-level budget
+checks by running `bash scripts/benchmark.sh`. The script builds the release
+binary and runs the same 100-iteration workload sequentially, timing each
+process with `/usr/bin/time -p`.
+
+| Script invocation | riscv-tci-vm wall time | ckb-debugger (`--mode fast`) wall time |
+| --- | ---: | ---: |
+| First invocation | 0.49 s | 0.36 s |
+| Repeat 1 | 0.40 s | 0.36 s |
+| Repeat 2 | 0.40 s | 0.35 s |
+| Repeat 3 | 0.39 s | 0.36 s |
+| Median of these four invocations | 0.40 s | 0.36 s |
+
+Both runners returned 0 in every invocation. The VM was slower by wall time
+in all four comparisons; its median was **11.1% longer** than ckb-debugger's.
+
+The earlier 0.34 s versus 0.37 s observation followed repeated benchmark runs
+and did not establish a reliable wall-time advantage. These script results
+supersede that comparison. The VM's internal execution timer covers `Vm::run`,
+excluding process startup, loading, statistics output, and cleanup. Its
+execution-time improvement over the unoptimized VM does not establish a
+wall-time advantage over ckb-debugger. The cause of the remaining wall-time
+overhead has not been isolated.
+
 ## Validation
 
 ```sh
