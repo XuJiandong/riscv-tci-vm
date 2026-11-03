@@ -15,7 +15,7 @@ Use rust 1.95 and clang 19: they are already installed.
 Don't cheat: don't refer any ckb-vm code.
 
 ## Tests
-The interpreter must successfully run the program at /home/xjd/projects/ckb-vm-contrib/ckb-vm-test-suite/programs/build/release/k256_ecdsa_ckbvm.
+The interpreter must successfully run the bundled program at `tests/fixtures/k256_ecdsa_ckbvm` with guest argument `1`. Run `cargo test --release --locked --test k256` to verify it; this test also runs in the default test suite. Set `K256_ELF` to test an alternate ELF.
 
 
 ## Syscalls

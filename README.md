@@ -13,10 +13,12 @@ Requires Rust 1.95.0, `clang-19`, and `ar`. The Rust toolchain is pinned in
 ```sh
 cargo build --release --locked
 target/release/riscv-tci-vm --stats \
-  /home/xjd/projects/ckb-vm-contrib/ckb-vm-test-suite/programs/build/release/k256_ecdsa_ckbvm 1
+  tests/fixtures/k256_ecdsa_ckbvm 1
 ```
 
-This executes the supplied cryptography workload and exits with code **0**.
+This executes the bundled cryptography workload and exits with code **0**.
+The ELF in `tests/fixtures/k256_ecdsa_ckbvm` was moved from
+`ckb-vm-contrib/ckb-vm-test-suite/programs/build/release/k256_ecdsa_ckbvm`.
 It retires **3,844,947 instructions**. The number after the ELF path is a guest
 argument. Arguments are passed exactly as supplied: the host ELF filename is
 **not** inserted into `argv`. This workload expects a numeric `argv[0]`.
@@ -98,8 +100,8 @@ sink for debug output. An instruction-limit error leaves the VM resumable.
 cargo test --release --locked
 cargo clippy --all-targets --locked -- -D warnings
 
-# Also execute the external binary from guide.md (override with K256_ELF).
-cargo test --release --locked --test k256 -- --ignored
+# Run only the bundled k256 test (override the ELF path with K256_ELF).
+cargo test --release --locked --test k256
 
 # Assemble an independent guest and run it here and in QEMU.
 # Requires ld.lld and qemu-riscv64 in addition to clang-19.
@@ -108,7 +110,7 @@ sh scripts/check-isa.sh
 # Instrument the C interpreter with undefined-behavior checks.
 # Requires the host UBSan runtime (libubsan).
 TCI_SANITIZE=1 CARGO_TARGET_DIR=target/ubsan \
-  cargo test --locked -- --include-ignored
+  cargo test --locked
 ```
 
 The Rust tests cover over 21,000 arithmetic/bit-manipulation vectors, signed and
@@ -116,24 +118,39 @@ unsigned divide corners, x0, aliasing JALR, memory widths, unaligned access,
 cross-page permissions, executable-page writes, NX execution, malformed ELFs,
 BSS, startup arguments, syscalls, precise faults, and budget/resume behavior.
 `tests/isa.S` independently checks assembler encodings, all RV64C integer forms,
-and M/B/Zbc operations against QEMU. The external k256 test checks exit code 0
-and confirms that over one million guest instructions were executed.
+and M/B/Zbc operations against QEMU. The bundled k256 test runs in the default
+test suite, checks exit code 0, and confirms that over one million guest
+instructions were executed.
 
 ## Performance
 
-Always benchmark release builds. `--stats` separates loading from execution;
-execution time includes translation and all interpreter work. MIPS counts
-retired guest instructions, not cycles. To reproduce repeated measurements:
+Compare a release build with `ckb-debugger` in `fast` mode using the same bundled
+ELF. Pass `100` as guest `argv[0]` to execute 100 workload iterations within one
+guest invocation, amortizing guest startup and cleanup. Run each command once,
+sequentially, without an extra warmup run:
 
 ```sh
-python3 scripts/bench.py \
-  /home/xjd/projects/ckb-vm-contrib/ckb-vm-test-suite/programs/build/release/k256_ecdsa_ckbvm \
-  --iterations 100 --runs 5
+cargo build --release --locked
+/usr/bin/time -f 'wall=%e s user=%U s system=%S s' \
+  target/release/riscv-tci-vm --stats tests/fixtures/k256_ecdsa_ckbvm 100
+/usr/bin/time -f 'wall=%e s user=%U s system=%S s' \
+  ckb-debugger --mode fast --bin tests/fixtures/k256_ecdsa_ckbvm -- 100
 ```
 
-Each measured process starts with an empty translation cache. The script first
-warms host caches with a separate process, then reports the median and range.
-On the development Intel Xeon E5-2670 v2 host, five 100-iteration measurements
-each retired 384,466,918 instructions. The median was **2.423 seconds (158.70
-MIPS)**, with a 2.366–2.468 second range. These are local measurements, not a
-comparison against other VMs or a portable throughput guarantee.
+On the development Intel Xeon E5-2670 v2 @ 2.50 GHz host, measured on
+2026-11-03 with `ckb-debugger 1.0.0` (default script version 2):
+
+| Runner | Wall time | User CPU time | System CPU time | Guest result |
+| --- | ---: | ---: | ---: | ---: |
+| riscv-tci-vm (release) | 2.45 s | 2.44 s | 0.00 s | 0 |
+| ckb-debugger (`--mode fast`) | 2.20 s | 2.19 s | 0.00 s | 0 |
+
+riscv-tci-vm took about **11% more wall time** in this comparison. Wall time
+includes process startup, ELF loading, execution, and cleanup for both runners;
+the build is excluded. These are single-run local measurements, not averages
+or a portable throughput guarantee.
+
+riscv-tci-vm reported **384,466,918 retired instructions**, 1.314 ms loading,
+and 2,449.331 ms execution (**156.97 MIPS**), including translation from an empty
+cache. ckb-debugger reported **725,894,181 CKB cycles**. CKB cycles and retired
+instructions are different measures; the comparison above uses wall time.

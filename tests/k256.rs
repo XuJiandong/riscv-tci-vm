@@ -1,10 +1,13 @@
 use riscv_tci_vm::Vm;
 
 #[test]
-#[ignore = "requires the external k256_ecdsa_ckbvm executable from guide.md"]
 fn supplied_k256_program_exits_successfully() {
     let path = std::env::var("K256_ELF").unwrap_or_else(|_| {
-        "/home/xjd/projects/ckb-vm-contrib/ckb-vm-test-suite/programs/build/release/k256_ecdsa_ckbvm".into()
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/k256_ecdsa_ckbvm"
+        )
+        .into()
     });
     let image = std::fs::read(path).unwrap();
     let mut vm = Vm::from_elf(&image, &["1".into()]).unwrap();
