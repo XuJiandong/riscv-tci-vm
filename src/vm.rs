@@ -254,6 +254,7 @@ impl Vm {
         if !code.last().unwrap().ends_block() {
             code.push(Insn::new(Opcode::Link, pc as u32, 0, 0, 0, 0).imm(pc));
         }
+        crate::ir::fuse(&mut code);
         let block = code.into_boxed_slice();
         self.cached_ops += block.len();
         self.lookup[self.pc as usize / 2] = block.as_ptr();
@@ -266,6 +267,163 @@ impl Vm {
 mod tests {
     use super::*;
     use crate::memory::{EXEC, PAGE_COUNT, PAGE_SIZE, READ, WRITE};
+
+    // Execute trusted test bytecode directly so the unfused interpreter is an
+    // independent oracle, including its precise exit state and memory effects.
+    fn execute_pair(
+        code: &[Insn],
+        regs: [u64; 33],
+        start: u64,
+        budget: u64,
+        memory: &mut Memory,
+    ) -> (i32, [u64; 33], u64, u64, u64) {
+        let mut blocks = vec![ptr::null(); code.last().unwrap().pc as usize / 2 + 1];
+        for (i, insn) in code.iter().enumerate() {
+            blocks[insn.pc as usize / 2] = code[i..].as_ptr();
+        }
+        let mut state = State {
+            regs,
+            pc: code[0].pc as u64,
+            steps: start,
+            limit: start.saturating_add(budget),
+            fault: 0,
+            memory: memory.bytes.as_mut_ptr(),
+            permissions: memory.permissions.as_ptr(),
+            blocks: blocks.as_ptr(),
+        };
+        // SAFETY: Live allocations, checked ABI, valid operands and a terminal
+        // Break instruction; the block table covers every reachable test PC.
+        let status = unsafe { tci_run(&mut state) };
+        (status, state.regs, state.pc, state.steps, state.fault)
+    }
+
+    #[test]
+    fn arithmetic_superinstructions_match_unfused_at_every_budget_boundary() {
+        let mut memory = Memory {
+            bytes: vec![0; MEMORY_SIZE].into_boxed_slice(),
+            permissions: Box::new([READ | EXEC; PAGE_COUNT]),
+        };
+        for (x, y) in [
+            (0, 0),
+            (0, u64::MAX),
+            (1, u64::MAX),
+            (u64::MAX, u64::MAX),
+            (1 << 63, 3),
+            (0x123456789abcdef0, 0xfedcba9876543210),
+        ] {
+            for rd in 0..4 {
+                for second_rd in 0..4 {
+                    for rs1 in 0..4 {
+                        for rs2 in 0..4 {
+                            // Exercise both immediate forms of ADD/SLTU and
+                            // both operand orders and rejected MUL aliases.
+                            for mode in 0..5 {
+                                let (first, second) = if mode == 4 {
+                                    (Opcode::Mulhu, Opcode::Mul)
+                                } else {
+                                    (Opcode::Add, Opcode::Ltu)
+                                };
+                                let mut code = [
+                                    Insn::new(first, 0x1000, 2, rd, 1, 2),
+                                    Insn::new(second, 0x1002, 4, second_rd, rs1, rs2),
+                                    Insn::new(Opcode::Break, 0x1006, 4, 0, 0, 0),
+                                ];
+                                if mode < 4 {
+                                    if mode & 1 != 0 {
+                                        code[0] = code[0].imm(y);
+                                    }
+                                    if mode & 2 != 0 {
+                                        code[1] = code[1].imm(y);
+                                    }
+                                }
+                                let mut fused = code;
+                                crate::ir::fuse(&mut fused);
+                                let mut regs = [0; 33];
+                                regs[1] = x;
+                                regs[2] = y;
+                                regs[3] = 17;
+                                for budget in 0..=3 {
+                                    let plain = execute_pair(&code, regs, 7, budget, &mut memory);
+                                    let combined =
+                                        execute_pair(&fused, regs, 7, budget, &mut memory);
+                                    assert_eq!(combined, plain, "{code:?}, budget={budget}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // A saturated limit still allows just the first operation to retire.
+        let mut code = [
+            Insn::new(Opcode::Add, 0x1000, 4, 1, 0, 0).imm(42),
+            Insn::new(Opcode::Ltu, 0x1004, 4, 2, 0, 1),
+            Insn::new(Opcode::Break, 0x1008, 4, 0, 0, 0),
+        ];
+        crate::ir::fuse(&mut code);
+        let result = execute_pair(&code, [0; 33], u64::MAX - 1, 10, &mut memory);
+        assert_eq!(result.0, 2);
+        assert_eq!((result.1[1], result.1[2]), (42, 0));
+        assert_eq!((result.2, result.3), (0x1004, u64::MAX));
+    }
+
+    #[test]
+    fn memory_superinstructions_preserve_order_faults_and_budget_stops() {
+        const PAGE: usize = 0x20000;
+        let mut memory = Memory {
+            bytes: vec![0x81; MEMORY_SIZE].into_boxed_slice(),
+            permissions: Box::new([READ | WRITE; PAGE_COUNT]),
+        };
+        memory.permissions[0] = 0;
+        memory.permissions[1] = READ | EXEC;
+        let addresses = [
+            0,
+            0x1000,
+            PAGE as u64,
+            PAGE as u64 + 1,
+            (PAGE + PAGE_SIZE - 7) as u64,
+            (PAGE + PAGE_SIZE - 8) as u64,
+            (PAGE + PAGE_SIZE) as u64,
+            (MEMORY_SIZE - 7) as u64,
+            u64::MAX - 3,
+        ];
+        for op in [Opcode::Ld, Opcode::Sd] {
+            for permission in [0, READ, WRITE, READ | WRITE, EXEC] {
+                memory.permissions[PAGE / PAGE_SIZE + 1] = permission;
+                for &first_address in &addresses {
+                    for &second_address in &addresses {
+                        // rd=1 feeds the loaded value into the second base;
+                        // rd=0 verifies that discarded loads still fault.
+                        for rd in [0, 1, 3] {
+                            let code = [
+                                Insn::new(op, 0x1000, 2, rd, 1, 3),
+                                Insn::new(op, 0x1002, 4, 0, 1, 2)
+                                    .imm(second_address.wrapping_sub(first_address)),
+                                Insn::new(Opcode::Break, 0x1006, 4, 0, 0, 0),
+                            ];
+                            let mut fused = code;
+                            crate::ir::fuse(&mut fused);
+                            let mut regs = [0; 33];
+                            regs[1] = first_address;
+                            regs[2] = 0xfedcba9876543210;
+                            regs[3] = 0x123456789abcdef0;
+                            for budget in 0..=3 {
+                                let plain = execute_pair(&code, regs, 11, budget, &mut memory);
+                                let expected = memory.bytes.clone();
+                                memory.bytes.fill(0x81);
+                                let combined = execute_pair(&fused, regs, 11, budget, &mut memory);
+                                assert_eq!(combined, plain, "{code:?}, budget={budget}");
+                                // Whole-memory comparison detects partial stores
+                                // and accidentally reordered overlapping writes.
+                                assert_eq!(memory.bytes, expected);
+                                memory.bytes.fill(0x81);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn memory_paths_preserve_bounds_permissions_and_precise_state() {

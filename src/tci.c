@@ -123,6 +123,14 @@ lookup:
     op_Nop: NEXT();
     BIN(Mov, b);
     BIN(Add, a + b);
+    op_AddLtu:
+        if (limit - steps < 2) goto op_Add;
+        r[ip->rd] = a + b;
+        ++ip;
+        /* Read after writeback: the comparison may consume the sum. */
+        a = r[ip->rs1]; b = ip->immediate ? ip->imm : r[ip->rs2];
+        ++steps;
+        RESULT(a < b);
     BIN(Sub, a - b);
     BIN(And, a & b);
     BIN(Or, a | b);
@@ -142,6 +150,15 @@ lookup:
     /* Unsigned multiply then correct the upper half for a's sign. */
     BIN(Mulhsu, (uint64_t)(((__uint128_t)a * b) >> 64) - ((int64_t)a < 0 ? b : 0));
     BIN(Mulhu, (uint64_t)(((__uint128_t)a * b) >> 64));
+    op_MulhuMul: {
+        if (limit - steps < 2) goto op_Mulhu;
+        /* Translation proves matching inputs and no high-result clobber. */
+        __uint128_t product = (__uint128_t)a * b;
+        r[ip->rd] = (uint64_t)(product >> 64);
+        ++ip;
+        ++steps;
+        RESULT((uint64_t)product);
+    }
     BIN(Div, divs(a, b));
     BIN(Divu, b ? a / b : UINT64_MAX);
     BIN(Rem, rems(a, b));
@@ -166,6 +183,19 @@ lookup:
     LOAD(Lhu, uint16_t, loaded);
     LOAD(Lwu, uint32_t, loaded);
 
+    op_LdLd: {
+        if (limit - steps < 2) goto op_Ld;
+        address = a + ip->imm;
+        if (!accessible(perms, address, sizeof(uint64_t), READ)) goto load_fault;
+        uint64_t loaded; memcpy(&loaded, mem + address, sizeof(loaded));
+        r[ip->rd] = loaded;
+        ++steps; ++ip;
+        /* The first load can change the second load's base. Advance the
+         * retirement count and PC before checking the second access. */
+        a = r[ip->rs1];
+        goto op_Ld;
+    }
+
 #define STORE(name, type) op_##name: { \
     address = a + ip->imm; \
     if (!accessible(perms, address, sizeof(type), WRITE)) goto store_fault; \
@@ -176,6 +206,17 @@ lookup:
     STORE(Sh, uint16_t);
     STORE(Sw, uint32_t);
     STORE(Sd, uint64_t);
+
+    op_SdSd: {
+        if (limit - steps < 2) goto op_Sd;
+        address = a + ip->imm;
+        if (!accessible(perms, address, sizeof(uint64_t), WRITE)) goto store_fault;
+        uint64_t stored = r[ip->rs2];
+        memcpy(mem + address, &stored, sizeof(stored));
+        ++steps; ++ip;
+        a = r[ip->rs1];
+        goto op_Sd;
+    }
 
     BRANCH(Beq, a == b);
     BRANCH(Bne, a != b);

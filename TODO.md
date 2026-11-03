@@ -336,7 +336,7 @@ python3 target/profiling/summarize-diagnostic.py
   discarded loads must still check permissions and fault, and all guest
   instructions must still count toward the budget.
 
-- [ ] **3. Amortize instruction-budget bookkeeping over blocks.** Add block
+- [x] **3. Amortize instruction-budget bookkeeping over blocks.** Add block
   instruction counts and use a fast path when the remaining budget covers the
   block, with the existing precise path for a partial block. Remove repeated
   `Link` tests where the IR layout makes them unnecessary. Explore deriving
@@ -368,18 +368,75 @@ python3 target/profiling/summarize-diagnostic.py
   QEMU ISA check, and UBSan passed, including new width/boundary/permission,
   precise-fault, partial-store, and budget/resume regression coverage.
 
-- [ ] **5. Introduce a small measured set of superinstructions.** Fuse frequent
-  adjacent IR sequences to amortize dispatch, register traffic, and accounting.
-  Measured candidates include paired `Sd`/`Ld`, `Add → Add`,
-  `Add → Ltu`, `Add → Bltu`, and `Mulhu → Mul`; inspect operand dependencies
-  before choosing an implementation. A single native multiplication could
-  supply both halves only when dependencies and register aliasing allow it.
-  Add local constant/copy propagation, redundant-move removal, and dead pure
-  result elimination where proven valid. Preserve original instruction counts,
-  intermediate registers, and each possible fault/budget PC; use an unfused path
-  when stopping inside a fused operation. Keep the set small to limit dispatch
-  and instruction-cache growth. This has broad potential but more correctness
-  risk than the preceding experiments.
+- [x] **5. Introduce a small measured set of superinstructions.** Completed
+  2026-11-03. Translation selects non-overlapping `Add → Ltu`, `Mulhu → Mul`,
+  `Ld → Ld`, and `Sd → Sd` pairs. Both 24-byte records remain in the cache;
+  only the first opcode changes. The second PC, operands, and original opcode
+  remain available for precise faults and ordinary execution when the budget
+  stops inside a pair. Register writeback precedes dependent reads. Memory
+  accesses remain ordered and independently checked, including discarded loads;
+  no permission/range check is hoisted across an access. Multiplication shares
+  one native unsigned multiply only for matching (possibly swapped) inputs when
+  the high-half destination does not clobber a low-half input. Disassembly
+  confirms both halves come from one `mul`. `tci_run` grows from **8,812 to
+  9,240 bytes (+4.9%)**; bytecode size and the cache bound are unchanged.
+
+  Experiments used the README Performance procedure: release build, then one
+  run of each runner in sequence with argument `100`, without a warmup. Each
+  row adds to the previous implementation. Times are unprofiled; speedups are
+  previous wall/execution time divided by the new time.
+
+  | Implementation | VM wall / user / system | VM execution | Incremental wall / execution speedup | ckb-debugger wall / user / system |
+  | --- | --- | ---: | ---: | --- |
+  | Fresh baseline | 1.92 / 1.92 / 0.00 s | 1,925.482 ms | — | 2.01 / 2.01 / 0.00 s |
+  | Add → Ltu | 1.89 / 1.88 / 0.00 s | 1,892.584 ms | 1.02× / 1.02× | 2.09 / 2.08 / 0.00 s |
+  | Add guarded Mulhu → Mul | 1.82 / 1.82 / 0.00 s | 1,821.111 ms | 1.04× / 1.04× | 2.16 / 2.16 / 0.00 s |
+  | Add paired Ld and Sd | 1.95 / 1.94 / 0.00 s | 1,949.648 ms | 0.93× / 0.93× | 2.06 / 2.05 / 0.00 s |
+
+  The first all-four run regressed, so five additional sequential rounds rotated
+  the order of saved binaries, without warmups. Median execution (range) was
+  **2,007.888 ms (1,886.103–2,020.699)** baseline,
+  **1,943.470 ms (1,858.929–2,003.811)** Add/Ltu,
+  **1,959.886 ms (1,873.036–1,970.340)** both arithmetic pairs, and
+  **1,889.708 ms (1,832.759–1,929.952)** all four. The retained set gives a
+  **1.06× median speedup** over baseline. Individual contributions are noisy,
+  ranges overlap, and these results do not establish a portable improvement.
+  All runs exit **0**, retire **384,466,918** instructions, and translate
+  **1,320** blocks. Comparator runs exit **0** with **725,894,181 CKB cycles**.
+
+  A separate instrumented source copy counted **17,026,200 Add/Ltu**,
+  **4,759,600 Mulhu/Mul**, **14,875,014 Ld/Ld**, and **13,191,916 Sd/Sd**
+  executions: **49,852,730 fewer dispatches**, equivalent to **12.97%** of
+  retired guest instructions. These are actual non-overlapping compatible
+  fusions, unlike the original adjacent-pair counts. Instrumented timings are
+  excluded from comparisons. Local binaries, repeat results, diagnostic source,
+  and disassembly are in ignored `target/superinstructions/`.
+
+  Final unchanged release build, measured after validation using the same
+  README procedure: **1.98 s wall / 1.97 s user / 0.00 s system**, with
+  **1,978.806 ms execution**, **0.263 ms loading**, and **194.29 MIPS**.
+  This is **0.97× wall and execution speedup** versus the fresh baseline
+  (a single-run regression); the repeated-run median above is the evidence for
+  retention. The final comparator took **1.97 / 1.97 / 0.00 s**. README's table
+  reports this final run, without replacing it with a faster sample. Environment:
+  the development Intel Xeon E5-2670 v2 host, Debian Clang **19.1.7**, Rust
+  **1.95.0**, and ckb-debugger **1.1.1**.
+
+  Validation passed: `cargo test --release --locked`,
+  `cargo clippy --all-targets --locked -- -D warnings`,
+  `sh scripts/check-isa.sh` against QEMU, and
+  `TCI_SANITIZE=1 CARGO_TARGET_DIR=target/ubsan cargo test --locked`.
+  New differential tests compare fused/unfused register, memory, fault, PC and
+  retirement state at every internal budget boundary, including aliasing,
+  discarded results, saturating limits, cross-page permissions and overlapping
+  stores. End-to-end tests cover repeated resumes, compressed instruction PCs,
+  pairs at the block cap, and branch entry into a previously fused pair's second
+  instruction. README changes are limited to the requested performance table.
+
+  Broader constant/copy propagation, move/dead-result elimination, Add/Add and
+  Add/branch fusion remain deferred to separately measured experiments. This
+  implementation keeps intermediate architectural state and all guest retirement
+  points rather than extending into a general local optimizer.
 
 ### P2 — Reduce block-transition and data-layout overhead
 
