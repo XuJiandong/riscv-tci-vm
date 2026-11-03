@@ -1,6 +1,6 @@
 use crate::{
     decode::{decode16, decode32},
-    ir::{Insn, Opcode},
+    ir::{Insn, MAX_BLOCK_INSNS, Opcode},
     memory::{MEMORY_SIZE, Memory},
 };
 use std::{fmt, io::Write, ptr};
@@ -215,8 +215,8 @@ impl Vm {
             self.cached_ops = 0;
         }
         let mut pc = self.pc;
-        let mut code = Vec::with_capacity(65);
-        for _ in 0..64 {
+        let mut code = Vec::with_capacity(MAX_BLOCK_INSNS + 1);
+        for _ in 0..MAX_BLOCK_INSNS {
             let mut fault = Insn::new(Opcode::Trap, pc as u32, 0, 0, 0, 0);
             fault.aux = 5;
             fault.imm = pc;
