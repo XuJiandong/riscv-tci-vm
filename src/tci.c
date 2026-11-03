@@ -48,11 +48,13 @@ static inline uint32_t ror32(uint32_t a, unsigned n) {
 }
 
 static inline int accessible(const uint8_t *p, uint64_t a, unsigned size, unsigned perm) {
-    /* Subtraction avoids integer wraparound; checks include both pages of
-     * unaligned accesses. The host load/store occurs only after both checks. */
+    /* Sizes are 1, 2, 4, or 8 bytes. Subtraction avoids integer wraparound.
+     * Naturally aligned accesses cannot cross a page; unaligned accesses
+     * check both endpoints before any host load/store. */
     return a <= MEM_SIZE - size &&
            (p[a >> PAGE_SHIFT] & perm) &&
-           (p[(a + size - 1) >> PAGE_SHIFT] & perm);
+           (__builtin_expect((a & (size - 1)) == 0, 1) ||
+            (p[(a + size - 1) >> PAGE_SHIFT] & perm));
 }
 
 /* Deliberately keep RISC-V divide corner cases away from x86 IDIV traps. */

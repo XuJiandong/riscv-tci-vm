@@ -325,7 +325,7 @@ python3 target/profiling/summarize-diagnostic.py
   Validation passed: `cargo test --release --locked`, Clippy with warnings denied,
   `scripts/check-isa.sh` against QEMU, and the README UBSan test command.
 
-- [ ] **2. Specialize operand fetch and common opcode forms.** Split frequently
+- [x] **2. Specialize operand fetch and common opcode forms.** Split frequently
   used immediate and register forms and move operand fetch into handlers that
   need it. Loads require a base plus their encoded displacement; stores can
   fetch their value once; moves and control operations need fewer inputs than
@@ -347,17 +347,26 @@ python3 target/profiling/summarize-diagnostic.py
   and saturating limits. Check budgets of zero, one, and every boundary within a
   block, especially blocks ending in synthetic `Link` operations.
 
-- [ ] **4. Add cheaper safe memory-access paths.** First try a same-page or
-  naturally aligned fast path, checking the second page only when necessary.
-  Compare the saved permission work against the added branch. Then consider a
-  small last-page permission/base cache, guarded stack-page paths, or reuse of
-  a proven address range across nearby accesses. The measured check region is
-  16.37%; memory as a whole is 23.32%. Keep subtraction-based bounds checks,
-  unaligned access support, both endpoint checks on crossings, and complete
-  validation before any store. Hoisting must not move a fault before earlier
-  guest side effects. Immutable permissions help caching, but do not prove that
-  a guest-controlled address is safe. Optimize `accessible`, `LOAD`, and `STORE`
-  without replacing already-inlined `memcpy` with unsafe typed dereferences.
+- [x] **4. Add cheaper safe memory-access paths.** Completed 2026-11-03.
+  `accessible()` skips the second permission lookup for naturally aligned
+  1/2/4/8-byte accesses, which cannot cross a 4 KiB page. A likely-aligned hint
+  keeps the common path falling through in the generated handlers. Bounds
+  checks still use subtraction; unaligned accesses check both endpoints before
+  the existing `memcpy`. No partially committed faulting store is allowed.
+  Same-page guards, alignment without a hint, and separate last-read/write-page
+  caches were measured but not retained. Stack special cases and cross-access
+  range hoisting remain possible future experiments, without current evidence
+  justifying their complexity.
+
+  Fresh baseline: **2.06 s wall / 2,061.165 ms execution**. Final retained build:
+  **1.94 s / 1,944.300 ms**, or **1.06× wall and execution speedup**. Both exit 0
+  with **384,466,918 instructions** and **1,320 blocks**. Five additional rounds
+  rotating variant order gave median execution of **1,973.133 ms baseline /
+  1,898.504 ms retained (1.04×)**; ranges overlap, so the gain is modest and
+  host/workload dependent. [README.md](README.md#safe-memory-access-paths-todo-item-4)
+  records every experiment and repeat comparison. Release tests, Clippy, the
+  QEMU ISA check, and UBSan passed, including new width/boundary/permission,
+  precise-fault, partial-store, and budget/resume regression coverage.
 
 - [ ] **5. Introduce a small measured set of superinstructions.** Fuse frequent
   adjacent IR sequences to amortize dispatch, register traffic, and accounting.

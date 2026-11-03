@@ -56,7 +56,9 @@ format or its complete TCG framework. No CKB-VM implementation source was used.
   explicit divide-by-zero/overflow behavior. `build.rs` tunes Clang 19's tail
   duplication to retain dispatch branches at individual handlers, giving the
   host branch predictor more opcode context. Unaligned accesses use `memcpy`
-  after checking the complete access. Every instruction has an associated
+  after checking the complete access. Naturally aligned loads/stores check
+  only the first page's permission because their widths divide the page size;
+  unaligned accesses check both endpoints. Every instruction has an associated
   guest PC, so faults and instruction-budget stops are precise.
 * The cache is bounded to about one million IR operations before flushing on a
   miss. Executable guest pages and their mappings are immutable after loading,
@@ -213,3 +215,64 @@ objdump -d --disassemble=tci_run target/release/riscv-tci-vm > target/tci-run.as
 rg -c 'jmp.*\*' target/tci-run.asm
 nm -S target/release/riscv-tci-vm | rg ' tci_run$'
 ```
+
+### Safe memory-access paths (TODO item 4)
+
+Measured on 2026-11-03 on the same Xeon E5-2670 v2 host with Debian Clang
+19.1.7, Rust 1.95.0, and ckb-debugger 1.1.1. The fresh baseline already includes
+the dispatch optimization above. Each experiment was built and measured with
+the single-run procedure, sequentially without an extra warmup. Speedups below
+are relative to this fresh baseline, not the preceding experiment.
+
+| Experiment | VM wall | VM execution | Wall speedup | Execution speedup | ckb-debugger wall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Fresh baseline | 2.06 s | 2,061.165 ms | 1.00× | 1.00× | 1.97 s |
+| Same-page guard | 2.27 s | 2,270.152 ms | 0.91× | 0.91× | 2.01 s |
+| Natural-alignment guard | 1.94 s | 1,941.520 ms | 1.06× | 1.06× | 2.05 s |
+| Separate last-read/write-page caches | 1.95 s | 1,950.552 ms | 1.06× | 1.06× | 2.13 s |
+| Alignment guard with likely-aligned hint (retained) | 2.03 s | 2,034.066 ms | 1.01× | 1.01× | 2.04 s |
+| Same-page guard with likely-same-page hint | 2.00 s | 1,998.181 ms | 1.03× | 1.03× | 2.12 s |
+| Retained alignment guard, final rebuild | 1.94 s | 1,944.300 ms | **1.06×** | **1.06×** | 2.13 s |
+
+All VM runs exited 0, retired **384,466,918 instructions**, and translated
+**1,320 blocks**. Baseline/final VM user CPU times were 2.05 / 1.94 s and system
+times were both 0.00 s. Loading took 0.398 / 0.244 ms and throughput was
+186.53 / 197.74 MIPS. The baseline/final comparator user CPU times were
+1.97 / 2.12 s, with 0.00 s system time; both exited 0 and reported
+725,894,181 CKB cycles.
+
+Single-run variation was substantial. An initial three-round baseline/alignment
+comparison had median execution of 1,945.552 / 1,955.232 ms (0.995×).
+A second three-round comparison rotating baseline, alignment, and cached
+variants had medians of 1,947.022 / 1,933.162 / 1,980.756 ms. The extra cache
+state did not establish a benefit and was discarded. Finally, five sequential
+rounds rotating the runner order compared the branch-layout alternatives:
+
+| Variant | Median execution | Range | Median speedup |
+| --- | ---: | ---: | ---: |
+| Baseline | 1,973.133 ms | 1,898.557–2,060.890 ms | 1.00× |
+| Alignment guard | 2,016.383 ms | 1,914.305–2,074.189 ms | 0.98× |
+| Alignment guard with hint (retained) | 1,898.504 ms | 1,863.461–2,002.955 ms | **1.04×** |
+| Same-page guard with hint | 2,038.600 ms | 1,896.923–2,053.878 ms | 0.97× |
+
+These additional runs are separate from the required single-run comparison.
+The overlapping ranges mean the modest gain should be remeasured on other
+hosts/workloads; the first alignment-only timing overstated its repeatability.
+
+The retained helper keeps the subtraction-based RAM bounds check and first-page
+permission check. For the supported 1/2/4/8-byte widths, natural alignment proves
+the access cannot cross a 4 KiB page, so the second permission lookup is skipped.
+The branch hint makes aligned accesses fall through directly in the generated
+load/store handlers. Unaligned accesses retain both endpoint checks before the
+existing `memcpy`; faulting stores cannot modify memory. No permission cache or
+Rust/C ABI change is retained. Disassembly shows 150 indirect dispatch sites
+unchanged and `tci_run` growing from 8,781 to 8,812 bytes.
+
+Validation passed: release tests, Clippy with warnings denied, the assembled ISA
+test against QEMU, and the README UBSan command. New C-interpreter regression
+coverage exercises every load/store width around page and RAM boundaries,
+denied endpoint permissions, large/wrapping-range addresses, sign extension,
+exact fault PCs/addresses and retirement, prior side effects, whole-memory
+comparison for partial stores, and budget stops/resumption at the access.
+Local experiment binaries, source snapshots, assembly, and repeat logs are in
+ignored `target/memory-paths/`; the results above survive `cargo clean`.
