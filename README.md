@@ -53,7 +53,9 @@ format or its complete TCG framework. No CKB-VM implementation source was used.
   block. A dense halfword-PC table lets the C loop chain cached successors
   without returning to Rust. Rust handles cache misses, syscalls, and errors.
 * `src/tci.c` uses computed-goto dispatch, unsigned wrapping arithmetic, and
-  explicit divide-by-zero/overflow behavior. Unaligned accesses use `memcpy`
+  explicit divide-by-zero/overflow behavior. `build.rs` tunes Clang 19's tail
+  duplication to retain dispatch branches at individual handlers, giving the
+  host branch predictor more opcode context. Unaligned accesses use `memcpy`
   after checking the complete access. Every instruction has an associated
   guest PC, so faults and instruction-budget stops are precise.
 * The cache is bounded to about one million IR operations before flushing on a
@@ -137,20 +139,77 @@ cargo build --release --locked
   ckb-debugger --mode fast --bin tests/fixtures/k256_ecdsa_ckbvm -- 100
 ```
 
-On the development Intel Xeon E5-2670 v2 @ 2.50 GHz host, measured on
-2026-11-03 with `ckb-debugger 1.0.0` (default script version 2):
+On the development Intel Xeon E5-2670 v2 @ 2.50 GHz x86_64 Linux host, measured
+on 2026-11-03 with Debian Clang 19.1.7, Rust 1.95.0, and `ckb-debugger 1.1.1`:
 
 | Runner | Wall time | User CPU time | System CPU time | Guest result |
 | --- | ---: | ---: | ---: | ---: |
-| riscv-tci-vm (release) | 2.45 s | 2.44 s | 0.00 s | 0 |
-| ckb-debugger (`--mode fast`) | 2.20 s | 2.19 s | 0.00 s | 0 |
+| riscv-tci-vm before dispatch optimization | 2.47 s | 2.46 s | 0.00 s | 0 |
+| ckb-debugger (`--mode fast`), baseline comparison | 2.05 s | 2.04 s | 0.00 s | 0 |
+| riscv-tci-vm after dispatch optimization | 2.00 s | 2.00 s | 0.00 s | 0 |
+| ckb-debugger (`--mode fast`), final comparison | 1.98 s | 1.97 s | 0.00 s | 0 |
 
-riscv-tci-vm took about **11% more wall time** in this comparison. Wall time
-includes process startup, ELF loading, execution, and cleanup for both runners;
-the build is excluded. These are single-run local measurements, not averages
-or a portable throughput guarantee.
+riscv-tci-vm improved by **1.24× in wall time** (2.47 / 2.00) and **1.23× in
+execution time** (2,468.087 / 2,002.720 ms). Its final wall time was about 1%
+longer than ckb-debugger. Wall time includes process startup, ELF loading,
+execution, and cleanup; the build is excluded. These are single-run local
+measurements, not averages or a portable throughput guarantee.
 
-riscv-tci-vm reported **384,466,918 retired instructions**, 1.314 ms loading,
-and 2,449.331 ms execution (**156.97 MIPS**), including translation from an empty
-cache. ckb-debugger reported **725,894,181 CKB cycles**. CKB cycles and retired
-instructions are different measures; the comparison above uses wall time.
+riscv-tci-vm reported **384,466,918 retired instructions** and **1,320 translated
+blocks** both before and after. Loading was 0.259 / 0.812 ms; execution throughput
+was 155.78 / 191.97 MIPS, including translation from an empty cache. ckb-debugger
+reported **725,894,181 CKB cycles** in both runs. CKB cycles and retired
+instructions are different measures; the runner comparison uses wall time.
+
+The dispatch experiment changed only native compiler settings. Clang 19's
+default tail-duplication predecessor/successor limits of 16 constrain the
+86-opcode dispatch graph. `build.rs` raises both limits and the instruction
+thresholds (`tail-dup-size`, `tail-dup-indirect-size`, and
+`tail-dup-placement-threshold`) to 128. Disassembly confirms that the retained
+configuration expands `tci_run` from **2,750 to 8,781 bytes** and from **5 to 150
+indirect jump sites**. For example, `Add` now ends in its own immediate/register
+dispatch branches instead of jumping to the common result/dispatch tail.
+Guest semantics, bytecode, operand fetching, and budget checks are unchanged.
+The larger host code footprint can be a tradeoff on other CPUs and workloads;
+these LLVM options and the generated topology should be rechecked on compiler
+upgrades or opcode-table changes.
+
+Each experiment below was built and measured with the same single-run procedure;
+speedups use the fresh 2,468.087 ms baseline, not the preceding experiment.
+Every VM run exited 0 with 384,466,918 retired instructions and 1,320 blocks.
+
+| Experiment | VM wall | VM execution | Execution speedup | Indirect jump sites | `tci_run` bytes | ckb-debugger wall |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Baseline | 2.47 s | 2,468.087 ms | 1.00× | 5 | 2,750 | 2.05 s |
+| Placement threshold 128 only | 2.49 s | 2,494.809 ms | 0.99× | 5 | 3,213 | 2.07 s |
+| All three instruction thresholds 128, tail merging disabled | 2.33 s | 2,333.022 ms | 1.06× | 1 | 12,392 | 2.07 s |
+| Original flags, explicit `Add` dispatch fast path | 2.37 s | 2,374.623 ms | 1.04× | 1 | 2,770 | 2.01 s |
+| All five thresholds/limits 128 (retained) | 1.93 s | 1,928.545 ms | 1.28× | 150 | 8,781 | 1.95 s |
+| Only indirect-size and predecessor/successor limits 128 | 2.07 s | 2,077.541 ms | 1.19× | 150 | 8,458 | 2.01 s |
+| Retained configuration, final rebuild | 2.00 s | 2,002.720 ms | 1.23× | 150 | 8,781 | 1.98 s |
+
+Separate follow-up measurements ran baseline, retained, and reduced settings
+sequentially for three rounds. Median execution times were **2,470.002**,
+**1,986.822**, and **2,017.289 ms**, respectively: a **1.24×** median speedup for
+the retained settings over baseline. These additional runs are separate from the
+required single-run comparison and show some host timing variability.
+
+Separate `perf stat` runs (all counters active 100% of the time) measured host
+cycles falling from 6,838,753,631 to 5,762,329,251, host instructions from
+10,054,070,665 to 9,430,645,665, and retired branch misses from 139,442,113 to
+108,003,195. Executed indirect-jump mispredictions fell from 137,781,220 /
+388,563,436 (**35.46%**) to 107,536,573 / 389,686,400 (**27.60%**). These
+speculative indirect-jump events differ from retired-branch events; they support
+improved prediction but do not isolate its exact contribution to elapsed time.
+Profiler timings are excluded from the speedups above. The event groups are
+`{cycles:u,instructions:u,branches:u,branch-misses:u}` and
+`{br_inst_exec.all_indirect_jump_non_call_ret:u,br_misp_exec.all_indirect_jump_non_call_ret:u}`;
+run each separately as described in TODO.md.
+
+To inspect the generated topology after a release build:
+
+```sh
+objdump -d --disassemble=tci_run target/release/riscv-tci-vm > target/tci-run.asm
+rg -c 'jmp.*\*' target/tci-run.asm
+nm -S target/release/riscv-tci-vm | rg ' tci_run$'
+```

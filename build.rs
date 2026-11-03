@@ -23,9 +23,24 @@ fn main() {
     rust.push_str("}\n");
     fs::write(out.join("opcodes.rs"), rust).unwrap();
     let mut cc = Command::new("clang-19");
+    // Let LLVM duplicate the computed-goto dispatch tails across the opcode
+    // table. Its default predecessor/successor limits (16) prevent this for
+    // our 86 handlers, even when the instruction thresholds are increased.
+    // Keep these Clang 19 settings together; see README.md for measurements
+    // and disassembly checks before changing the compiler or opcode table.
     cc.args([
         "-std=gnu11",
         "-O3",
+        "-mllvm",
+        "-tail-dup-placement-threshold=128",
+        "-mllvm",
+        "-tail-dup-size=128",
+        "-mllvm",
+        "-tail-dup-indirect-size=128",
+        "-mllvm",
+        "-tail-dup-pred-size=128",
+        "-mllvm",
+        "-tail-dup-succ-size=128",
         "-Wall",
         "-Wextra",
         "-Werror",
