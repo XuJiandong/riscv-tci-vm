@@ -57,7 +57,8 @@ static inline int accessible(const uint8_t *p, uint64_t a, unsigned size, unsign
             (p[(a + size - 1) >> PAGE_SHIFT] & perm));
 }
 
-/* Deliberately keep RISC-V divide corner cases away from x86 IDIV traps. */
+/* Handle RISC-V divide corner cases before C division: zero divisors and
+ * signed overflow are undefined in C on both x86_64 and AArch64. */
 static uint64_t divs(uint64_t a, uint64_t b) {
     if (!b) return UINT64_MAX;
     if (a == (UINT64_C(1) << 63) && b == UINT64_MAX) return a;

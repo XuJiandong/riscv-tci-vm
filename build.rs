@@ -1,12 +1,13 @@
 use std::{env, fs, path::PathBuf, process::Command};
 
 fn main() {
-    assert_eq!(
-        env::var("CARGO_CFG_TARGET_ARCH").unwrap(),
-        "x86_64",
-        "x86_64 host required"
+    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    assert!(
+        matches!(arch.as_str(), "x86_64" | "aarch64"),
+        "x86_64 or aarch64 host required"
     );
     assert_eq!(env::var("CARGO_CFG_TARGET_ENDIAN").unwrap(), "little");
+    let target = env::var("TARGET").unwrap();
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let definitions = fs::read_to_string("src/ops.def").unwrap();
     let names: Vec<_> = definitions
@@ -23,6 +24,8 @@ fn main() {
     rust.push_str("}\n");
     fs::write(out.join("opcodes.rs"), rust).unwrap();
     let mut cc = Command::new("clang-19");
+    // Match Rust's target even if Clang defaults to a different architecture.
+    cc.arg(format!("--target={target}"));
     // Let LLVM duplicate the computed-goto dispatch tails across the opcode
     // table. Its default predecessor/successor limits (16) prevent this for
     // our 86 handlers, even when the instruction thresholds are increased.
@@ -53,7 +56,28 @@ fn main() {
     .arg(out.join("tci.o"));
     if env::var_os("TCI_SANITIZE").is_some() {
         cc.args(["-fsanitize=undefined", "-fno-sanitize-recover=all"]);
-        println!("cargo:rustc-link-lib=ubsan");
+        if env::var("CARGO_CFG_TARGET_OS").unwrap() == "macos" {
+            // Darwin ships Clang's compiler-rt instead of a standalone libubsan.
+            let runtime = Command::new("clang-19")
+                .arg(format!("--target={target}"))
+                .arg("--print-file-name=libclang_rt.ubsan_osx_dynamic.dylib")
+                .output()
+                .expect("clang-19 is required");
+            assert!(runtime.status.success(), "cannot locate the UBSan runtime");
+            let runtime = String::from_utf8(runtime.stdout).unwrap();
+            let runtime = PathBuf::from(runtime.trim());
+            assert!(
+                runtime.is_file(),
+                "missing UBSan runtime: {}",
+                runtime.display()
+            );
+            let directory = runtime.parent().unwrap().display();
+            println!("cargo:rustc-link-search=native={directory}");
+            println!("cargo:rustc-link-lib=dylib=clang_rt.ubsan_osx_dynamic");
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{directory}");
+        } else {
+            println!("cargo:rustc-link-lib=ubsan");
+        }
     }
     assert!(cc.status().expect("clang-19 is required").success());
     assert!(
