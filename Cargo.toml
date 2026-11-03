@@ -1,0 +1,19 @@
+[package]
+name = "riscv-tci-vm"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "RV64IMCB interpreter with TCI-style translation blocks, without a JIT"
+license = "MIT"
+build = "build.rs"
+
+[dependencies]
+goblin = "0.10"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
