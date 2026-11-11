@@ -11,7 +11,8 @@ pub(crate) struct Insn {
     pub rs2: u8,
     pub immediate: u8,
     pub len: u8,
-    pub padding: u16,
+    // Opcode plus the immediate bit, using the former padding bytes.
+    dispatch_index: u16,
     pub pc: u32,
     pub aux: u32,
     pub imm: u64,
@@ -27,7 +28,7 @@ impl Insn {
             rs1,
             rs2,
             immediate: 0,
-            padding: 0,
+            dispatch_index: op as u16,
             aux: 0,
             imm: 0,
         }
@@ -35,7 +36,12 @@ impl Insn {
     pub fn imm(mut self, value: u64) -> Self {
         self.imm = value;
         self.immediate = 1;
+        self.dispatch_index |= 128;
         self
+    }
+    fn set_opcode(&mut self, op: Opcode) {
+        self.op = op;
+        self.dispatch_index = op as u16 | u16::from(self.immediate) << 7;
     }
     pub fn ends_block(&self) -> bool {
         use Opcode::*;
@@ -74,7 +80,7 @@ pub(crate) fn fuse(code: &mut [Insn]) {
             _ => None,
         };
         if let Some(op) = fused {
-            code[i].op = op;
+            code[i].set_opcode(op);
             i += 2;
         } else {
             i += 1;

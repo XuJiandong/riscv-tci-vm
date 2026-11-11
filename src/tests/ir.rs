@@ -11,7 +11,7 @@ fn multiply_fusion_requires_unchanged_matching_inputs() {
                         Insn::new(Opcode::Mul, 0x1004, 4, 1, low_a, low_b),
                     ];
                     if immediate != 0 {
-                        pair[immediate - 1].immediate = 1;
+                        pair[immediate - 1] = pair[immediate - 1].imm(0);
                     }
                     fuse(&mut pair);
                     let expected = immediate == 0
@@ -38,7 +38,8 @@ fn fusion_keeps_records_and_does_not_overlap_or_cross_terminators() {
     let original = code;
     fuse(&mut code);
     assert_eq!(code[0].op, Opcode::LdLd);
-    code[0].op = Opcode::Ld;
+    assert_eq!(code[0].dispatch_index, 128 + Opcode::LdLd as u16);
+    code[0].set_opcode(Opcode::Ld);
     for (actual, expected) in code.iter().zip(original) {
         // All metadata, including each original PC and length, survives.
         assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
