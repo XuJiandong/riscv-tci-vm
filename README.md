@@ -149,10 +149,24 @@ experiment sections below.
 On the development Intel Xeon E5-2670 v2 @ 2.50 GHz x86_64 Linux host, measured
 on 2026-11-03 with Debian Clang 19.1.7, Rust 1.95.0, and `ckb-debugger 1.1.1`:
 
-| Runner | Wall time | User CPU time | System CPU time | Guest result |
-| --- | ---: | ---: | ---: | ---: |
-| riscv-tci-vm (current: dispatch, memory-access, and superinstruction optimizations) | 2.00 s | 1.99 s | 0.00 s | 0 |
-| ckb-debugger (`--mode fast`) | 2.18 s | 2.18 s | 0.00 s | 0 |
+| Fixture (100 iterations) | Runner | Wall time | User CPU time | System CPU time | Guest result | Wall-time speedup over ckb-debugger |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `ed25519_ckbvm` | riscv-tci-vm | 0.45 s | 0.45 s | 0.00 s | 0 | 1.13× |
+| `ed25519_ckbvm` | ckb-debugger (`--mode fast`) | 0.51 s | 0.51 s | 0.00 s | 0 | — |
+| `k256_ecdsa_ckbvm` | riscv-tci-vm | 1.87 s | 1.87 s | 0.00 s | 0 | 1.09× |
+| `k256_ecdsa_ckbvm` | ckb-debugger (`--mode fast`) | 2.03 s | 2.02 s | 0.00 s | 0 | — |
+| `k256_schnorr_ckbvm` | riscv-tci-vm | 0.93 s | 0.93 s | 0.00 s | 0 | 1.00× |
+| `k256_schnorr_ckbvm` | ckb-debugger (`--mode fast`) | 0.93 s | 0.92 s | 0.00 s | 0 | — |
+| `p256_ckbvm` | riscv-tci-vm | 1.84 s | 1.84 s | 0.00 s | 0 | 1.21× |
+| `p256_ckbvm` | ckb-debugger (`--mode fast`) | 2.22 s | 2.22 s | 0.00 s | 0 | — |
+| `rsa_ckbvm` | riscv-tci-vm | 1.09 s | 1.09 s | 0.00 s | 0 | 1.23× |
+| `rsa_ckbvm` | ckb-debugger (`--mode fast`) | 1.34 s | 1.34 s | 0.00 s | 0 | — |
+| `secp256k1_ecdsa_ckbvm` | riscv-tci-vm | 0.32 s | 0.32 s | 0.00 s | 0 | 1.09× |
+| `secp256k1_ecdsa_ckbvm` | ckb-debugger (`--mode fast`) | 0.35 s | 0.34 s | 0.00 s | 0 | — |
+| `secp256k1_schnorr_ckbvm` | riscv-tci-vm | 0.28 s | 0.28 s | 0.00 s | 0 | 1.25× |
+| `secp256k1_schnorr_ckbvm` | ckb-debugger (`--mode fast`) | 0.35 s | 0.35 s | 0.00 s | 0 | — |
+| `sphincsplus_ref_ckbvm` | riscv-tci-vm | 14.67 s | 14.67 s | 0.00 s | 0 | 1.21× |
+| `sphincsplus_ref_ckbvm` | ckb-debugger (`--mode fast`) | 17.74 s | 17.73 s | 0.00 s | 0 | — |
 
 The current VM executed in **1,944.300 ms**, retiring **384,466,918 instructions**
 across **1,320 translated blocks**, with 0.244 ms loading and 197.74 MIPS.
